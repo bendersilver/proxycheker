@@ -1,10 +1,8 @@
 package proxycheker
 
 import (
-	"context"
 	"fmt"
 	"net/url"
-	"runtime"
 	"sync"
 	"time"
 
@@ -12,15 +10,17 @@ import (
 	"github.com/imroc/req"
 )
 
-// proxyItem -
-type proxyItem struct {
+// ProxyItem -
+type ProxyItem struct {
 	Host string
 	Type string
+	Err  error
+	Rsp  *req.Resp
 }
 
 // newProxyItem -
-func newProxyItem(host, typ string) *proxyItem {
-	return &proxyItem{
+func newProxyItem(host, typ string) *ProxyItem {
+	return &ProxyItem{
 		Host: host,
 		Type: typ,
 	}
@@ -28,30 +28,30 @@ func newProxyItem(host, typ string) *proxyItem {
 
 // Settings -
 type Settings struct {
-	sync.Mutex
+	mx          sync.Mutex
 	CheckURL    string
 	NumThread   int
-	Success     func(string, string, *req.Resp)
-	Error       func(string, string, error)
+	Success     func(*ProxyItem)
+	Error       func(*ProxyItem)
 	DialTimeout time.Duration
 	ConnTimeout time.Duration
 
-	chanProxy chan *proxyItem
+	chanProxy chan *ProxyItem
 	counter   int
 	done      chan bool
 }
 
 // incr -
 func (s *Settings) incr() {
-	s.Lock()
-	defer s.Unlock()
+	s.mx.Lock()
+	defer s.mx.Unlock()
 	s.counter++
 }
 
 // reduce -
 func (s *Settings) reduce() {
-	s.Lock()
-	defer s.Unlock()
+	s.mx.Lock()
+	defer s.mx.Unlock()
 	s.counter--
 	if s.counter == 0 {
 		close(s.done)
@@ -65,39 +65,36 @@ func (s *Settings) Done() {
 
 // Init -
 func (s *Settings) worker() {
+	rq := proxyreq.NewEmpty()
+	ur := &url.URL{}
 	for {
 		select {
 		case p := <-s.chanProxy:
-
 			s.incr()
-			if r, err := proxyreq.New(p.Host, p.Type); err != nil {
+			ur.Host = p.Host
+			ur.Scheme = p.Type
+			if p.Err = rq.SetTransport(ur); p.Err != nil {
 				if s.Error != nil {
-					s.Error(p.Host, p.Type, err)
+					s.Error(p)
 				}
 			} else {
-				ctx, cancel := context.WithCancel(context.TODO())
-				time.AfterFunc(s.ConnTimeout, func() {
-					cancel()
-				})
-				if rsp, err := r.Get(s.CheckURL, ctx); err != nil {
+				if p.Rsp, p.Err = rq.Get(s.CheckURL); p.Err != nil {
 					if s.Error != nil {
-						s.Error(p.Host, p.Type, err)
+						s.Error(p)
 					}
 				} else {
 					if s.Success != nil {
-						s.Success(p.Host, p.Type, rsp)
+						s.Success(p)
 					}
 				}
-				cancel()
-				s.reduce()
 			}
+			s.reduce()
 		}
 	}
 }
 
 // Init -
 func (s *Settings) Init() error {
-	runtime.GOMAXPROCS(1)
 	_, err := url.Parse(s.CheckURL)
 	if err != nil {
 		return err
@@ -117,7 +114,7 @@ func (s *Settings) Init() error {
 	for ix := 0; ix < s.NumThread; ix++ {
 		go s.worker()
 	}
-	s.chanProxy = make(chan *proxyItem, s.NumThread)
+	s.chanProxy = make(chan *ProxyItem)
 	return nil
 }
 
@@ -129,13 +126,11 @@ var typs = map[string]bool{
 
 // Check -
 func (s *Settings) Check(host, tp string) {
-	if len(host) >= 7 {
-		if ok := typs[tp]; !ok {
-			for t := range typs {
-				s.chanProxy <- newProxyItem(host, t)
-			}
-		} else {
-			s.chanProxy <- newProxyItem(host, tp)
+	if ok := typs[tp]; !ok {
+		for t := range typs {
+			s.chanProxy <- newProxyItem(host, t)
 		}
+	} else {
+		s.chanProxy <- newProxyItem(host, tp)
 	}
 }
