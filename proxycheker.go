@@ -28,7 +28,7 @@ func newProxyItem(host, typ string) *ProxyItem {
 
 // Settings -
 type Settings struct {
-	mx          sync.Mutex
+	wg          sync.WaitGroup
 	CheckURL    string
 	NumThread   int
 	Success     func(*ProxyItem)
@@ -37,30 +37,11 @@ type Settings struct {
 	ConnTimeout time.Duration
 
 	chanProxy chan *ProxyItem
-	counter   int
-	done      chan bool
 }
 
-// incr -
-func (s *Settings) incr() {
-	s.mx.Lock()
-	defer s.mx.Unlock()
-	s.counter++
-}
-
-// reduce -
-func (s *Settings) reduce() {
-	s.mx.Lock()
-	defer s.mx.Unlock()
-	s.counter--
-	if s.counter == 0 {
-		close(s.done)
-	}
-}
-
-// Done -
-func (s *Settings) Done() {
-	<-s.done
+// Wait -
+func (s *Settings) Wait() {
+	s.wg.Wait()
 }
 
 // Init -
@@ -70,7 +51,7 @@ func (s *Settings) worker() {
 	for {
 		select {
 		case p := <-s.chanProxy:
-			s.incr()
+			s.wg.Add(1)
 			ur.Host = p.Host
 			ur.Scheme = p.Type
 			if p.Err = rq.SetTransport(ur); p.Err != nil {
@@ -88,7 +69,7 @@ func (s *Settings) worker() {
 					}
 				}
 			}
-			s.reduce()
+			s.wg.Done()
 		}
 	}
 }
@@ -99,7 +80,7 @@ func (s *Settings) Init() error {
 	if err != nil {
 		return err
 	}
-	if s.NumThread < 1 {
+	if s.NumThread < 2 {
 		return fmt.Errorf("number of threads less than 1")
 	}
 	if s.DialTimeout < time.Millisecond {
@@ -110,11 +91,10 @@ func (s *Settings) Init() error {
 		return fmt.Errorf("ConnTimeout less than a millisecond")
 	}
 	proxyreq.ClientTimeout = s.ConnTimeout
-	s.done = make(chan bool)
 	for ix := 0; ix < s.NumThread; ix++ {
 		go s.worker()
 	}
-	s.chanProxy = make(chan *ProxyItem)
+	s.chanProxy = make(chan *ProxyItem, 2)
 	return nil
 }
 
