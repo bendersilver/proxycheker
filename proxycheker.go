@@ -28,13 +28,14 @@ func newProxyItem(host, typ string) *ProxyItem {
 
 // Settings -
 type Settings struct {
-	wg          sync.WaitGroup
-	CheckURL    string
-	NumThread   int
-	Success     func(*ProxyItem)
-	Error       func(*ProxyItem)
-	DialTimeout time.Duration
-	ConnTimeout time.Duration
+	wg           sync.WaitGroup
+	CheckURL     string
+	NumThread    int
+	Success      func(*ProxyItem)
+	Error        func(*ProxyItem)
+	DialTimeout  time.Duration
+	ConnTimeout  time.Duration
+	DisableHTTPS bool
 
 	chanProxy chan *ProxyItem
 }
@@ -81,7 +82,7 @@ func (s *Settings) Init() error {
 		return err
 	}
 	if s.NumThread < 2 {
-		return fmt.Errorf("number of threads less than 1")
+		return fmt.Errorf("number of threads less than 2")
 	}
 	if s.DialTimeout < time.Millisecond {
 		return fmt.Errorf("DialTimeout less than a millisecond")
@@ -94,7 +95,7 @@ func (s *Settings) Init() error {
 	for ix := 0; ix < s.NumThread; ix++ {
 		go s.worker()
 	}
-	s.chanProxy = make(chan *ProxyItem, 2)
+	s.chanProxy = make(chan *ProxyItem, s.NumThread)
 	return nil
 }
 
@@ -108,6 +109,9 @@ var typs = map[string]bool{
 func (s *Settings) Check(host, tp string) {
 	if ok := typs[tp]; !ok {
 		for t := range typs {
+			if s.DisableHTTPS && t == "https" {
+				continue
+			}
 			s.chanProxy <- newProxyItem(host, t)
 		}
 	} else {

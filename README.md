@@ -44,6 +44,6 @@ func main() {
 	for host, tp := range arr {
 		st.Check(host, tp)
 	}
-	st.Done()
+	st.Wait()
 }
 ```
