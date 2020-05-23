@@ -2,12 +2,14 @@ package proxycheker
 
 import (
 	"fmt"
+	"net"
 	"net/url"
+	"runtime"
 	"sync"
 	"time"
 
 	"github.com/bendersilver/proxyreq"
-	"github.com/imroc/req"
+	"golang.org/x/net/proxy"
 )
 
 // ProxyItem -
@@ -15,7 +17,7 @@ type ProxyItem struct {
 	Host string
 	Type string
 	Err  error
-	Rsp  *req.Resp
+	Time time.Duration
 }
 
 // newProxyItem -
@@ -47,24 +49,27 @@ func (s *Settings) Wait() {
 
 // Init -
 func (s *Settings) worker() {
-	rq := proxyreq.NewEmpty()
-	ur := &url.URL{}
+	var dialer proxy.Dialer
+	var conn net.Conn
 	for {
 		select {
 		case p := <-s.chanProxy:
 			s.wg.Add(1)
-			ur.Host = p.Host
-			ur.Scheme = p.Type
-			if p.Err = rq.SetTransport(ur); p.Err != nil {
+			now := time.Now()
+			dialer, p.Err = proxyreq.Dialer(p.Host, p.Type)
+			if p.Err != nil {
 				if s.Error != nil {
 					s.Error(p)
 				}
 			} else {
-				if p.Rsp, p.Err = rq.Get(s.CheckURL); p.Err != nil {
+				conn, p.Err = dialer.Dial("tcp", s.CheckURL)
+				if p.Err != nil {
 					if s.Error != nil {
 						s.Error(p)
 					}
 				} else {
+					conn.Close()
+					p.Time = time.Now().Sub(now)
 					if s.Success != nil {
 						s.Success(p)
 					}
@@ -77,6 +82,8 @@ func (s *Settings) worker() {
 
 // Init -
 func (s *Settings) Init() error {
+	runtime.GOMAXPROCS(1)
+
 	_, err := url.Parse(s.CheckURL)
 	if err != nil {
 		return err
@@ -87,15 +94,15 @@ func (s *Settings) Init() error {
 	if s.DialTimeout < time.Millisecond {
 		return fmt.Errorf("DialTimeout less than a millisecond")
 	}
-	proxyreq.DialTimeout = s.DialTimeout
+	proxyreq.SetDialTimeout(s.DialTimeout)
 	if s.ConnTimeout < time.Millisecond {
 		return fmt.Errorf("ConnTimeout less than a millisecond")
 	}
-	proxyreq.ClientTimeout = s.ConnTimeout
+	proxyreq.SetConnTimeout(s.ConnTimeout)
 	for ix := 0; ix < s.NumThread; ix++ {
 		go s.worker()
 	}
-	s.chanProxy = make(chan *ProxyItem, s.NumThread)
+	s.chanProxy = make(chan *ProxyItem, 1)
 	return nil
 }
 
