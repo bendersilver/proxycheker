@@ -1,7 +1,6 @@
 package proxycheker
 
 import (
-	"fmt"
 	"net"
 	"net/url"
 	"runtime"
@@ -9,6 +8,8 @@ import (
 	"time"
 
 	"github.com/bendersilver/proxyreq"
+	"github.com/dustin/go-broadcast"
+	"github.com/imroc/req"
 	"golang.org/x/net/proxy"
 )
 
@@ -17,7 +18,7 @@ type ProxyItem struct {
 	Host string
 	Type string
 	Err  error
-	Time time.Duration
+	Resp *req.Resp
 }
 
 // newProxyItem -
@@ -40,22 +41,35 @@ type Settings struct {
 	DisableHTTPS bool
 
 	chanProxy chan *ProxyItem
+	br        broadcast.Broadcaster
 }
 
 // Wait -
 func (s *Settings) Wait() {
 	s.wg.Wait()
+	s.br.Submit(nil)
+	s.br.Close()
+	runtime.GC()
 }
 
 // Init -
 func (s *Settings) worker() {
 	var dialer proxy.Dialer
 	var conn net.Conn
+	rq := proxyreq.NewEmpty()
+
+	ch := make(chan interface{})
+	s.br.Register(ch)
 	for {
 		select {
+		case <-ch:
+			dialer = nil
+			conn = nil
+			s.br.Unregister(ch)
+			close(ch)
+			return
 		case p := <-s.chanProxy:
 			s.wg.Add(1)
-			now := time.Now()
 			dialer, p.Err = proxyreq.Dialer(p.Host, p.Type)
 			if p.Err != nil {
 				if s.Error != nil {
@@ -69,9 +83,27 @@ func (s *Settings) worker() {
 					}
 				} else {
 					conn.Close()
-					p.Time = time.Now().Sub(now)
-					if s.Success != nil {
-						s.Success(p)
+
+					rq.SetTransport(p.Host, p.Type)
+					var ur url.URL
+					hs, prt, _ := net.SplitHostPort(s.CheckURL)
+					ur.Host = hs
+					ur.Scheme = "http"
+					switch prt {
+					case "443":
+						ur.Scheme = "https"
+					default:
+						ur.Host = s.CheckURL
+					}
+					p.Resp, p.Err = rq.Get(ur.String())
+					if p.Err != nil {
+						if s.Error != nil {
+							s.Error(p)
+						}
+					} else {
+						if s.Success != nil {
+							s.Success(p)
+						}
 					}
 				}
 			}
@@ -82,34 +114,27 @@ func (s *Settings) worker() {
 
 // Init -
 func (s *Settings) Init() error {
-	runtime.GOMAXPROCS(1)
-
 	_, err := url.Parse(s.CheckURL)
 	if err != nil {
 		return err
 	}
-	if s.NumThread < 2 {
-		return fmt.Errorf("number of threads less than 2")
+	s.chanProxy = make(chan *ProxyItem)
+	if s.NumThread < 1 {
+		s.NumThread = 1
 	}
-	if s.DialTimeout < time.Millisecond {
-		return fmt.Errorf("DialTimeout less than a millisecond")
-	}
-	proxyreq.SetDialTimeout(s.DialTimeout)
-	if s.ConnTimeout < time.Millisecond {
-		return fmt.Errorf("ConnTimeout less than a millisecond")
-	}
-	proxyreq.SetConnTimeout(s.ConnTimeout)
+	s.br = broadcast.NewBroadcaster(s.NumThread)
 	for ix := 0; ix < s.NumThread; ix++ {
 		go s.worker()
 	}
-	s.chanProxy = make(chan *ProxyItem, 1)
+	proxyreq.SetDialTimeout(s.DialTimeout)
+	proxyreq.SetConnTimeout(s.ConnTimeout)
 	return nil
 }
 
 var typs = map[string]bool{
-	"http":   true,
-	"https":  true,
 	"socks5": true,
+	"https":  true,
+	"http":   true,
 }
 
 // Check -
